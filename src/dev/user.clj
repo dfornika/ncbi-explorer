@@ -1,9 +1,44 @@
 (ns user
   (:require [ncbi-api-client.core :as ncbi]
             [ncbi-api-client.datafy :as d]
+            [ncbi-api-client.package :as pkg]
             [clojure.datafy :refer [datafy nav]]
-            [martian.core :as martian]
-            [hato.client :as hc]))
+            [clojure.string :as str]
+            [martian.core :as martian]))
+
+(defn find-gene-in-annotations
+  "Find a gene by symbol in an assembly's annotations."
+  [client accession symbol]
+  (->> (ncbi/annotations client accession)
+       (filter #(= symbol (:symbol %)))
+       first))
+
+(defn get-gene-fasta
+  "Download gene FASTA sequences by gene ID."
+  [client gene-id]
+  (let [pkg (ncbi/download-gene-package client gene-id
+                                        {:include-annotations [:fasta-gene]})]
+    (nav (datafy pkg) :ncbi.nav/gene-fasta :deferred)))
+
+(defn compare-sequences
+  "Compare two nucleotide sequences, returning identity and differences."
+  [seq1 seq2]
+  (let [s1 (:sequence seq1)
+        s2 (:sequence seq2)
+        len1 (count s1)
+        len2 (count s2)
+        min-len (min len1 len2)
+        diffs (keep-indexed
+               (fn [i [a b]] (when (not= a b) {:pos i :a a :b b}))
+               (map vector (take min-len s1) (take min-len s2)))]
+    {:acc-a (:acc seq1)
+     :acc-b (:acc seq2)
+     :len-a len1
+     :len-b len2
+     :same-length? (= len1 len2)
+     :mismatches (count diffs)
+     :identity (format "%.1f%%" (* 100.0 (/ (- min-len (count diffs)) min-len)))
+     :differences (vec diffs)}))
 
 (comment
   ;; === Setup ===
@@ -21,42 +56,35 @@
                    :level (get-in % [:assembly_info :assembly_level]))
         (take 5 ecoli-assemblies))
 
-  ;; === Annotations: find recA on K-12 ===
-  (def k12-anns (ncbi/annotations client "GCF_000005845.2"))
-  (->> k12-anns
-       (filter #(= "recA" (:symbol %)))
-       first
-       (#(select-keys % [:gene_id :symbol :name :gene_type])))
-  ;; => {:gene_id "947170", :symbol "recA", :name "DNA recombination/repair protein RecA", :gene_type "protein-coding"}
+  ;; === Find recA across assemblies ===
+  ;; K-12 (MG1655) and O157:H7 Sakai both have recA in their annotations
+  (def k12-reca (find-gene-in-annotations client "GCF_000005845.2" "recA"))
+  ;; => {:gene_id "947170", :symbol "recA", ...}
 
-  ;; === Gene -> Products -> Protein accession ===
+  (def o157-reca (find-gene-in-annotations client "GCF_000008865.2" "recA"))
+  ;; => {:gene_id "914722", :symbol "recA", ...}
+
+  ;; === Download FASTA via package nav ===
+  ;; Use vary-meta to request annotation types, then nav to :ncbi.nav/package
   (def reca-gene (first (ncbi/gene client ["947170"])))
-  (def reca-products (nav (datafy reca-gene) :ncbi.nav/products :deferred))
-  (let [p (first reca-products)]
-    (mapv #(select-keys % [:accession_version :name :type :length :protein])
-          (:transcripts p)))
-  ;; => [{:protein {:accession_version "NP_417179.1", ...}}]
+  (def reca-gene+ (vary-meta reca-gene assoc
+                             :ncbi/include-annotations [:fasta-gene]))
+  (def reca-pkg (nav (datafy reca-gene+) :ncbi.nav/package :deferred))
+  (keys (datafy reca-pkg))
+  ;; => (:catalog :ncbi.nav/gene-fasta :ncbi.nav/data-report)
 
-  ;; === Download gene FASTA via martian (broken: returns zip as string) ===
-  (def dl-result (martian/response-for client :download-gene-package
-                                       {:gene-ids [947170]
-                                        :include-annotation-type ["FASTA_GENE"]}))
-  {:status (:status dl-result) :content-type (:content-type dl-result)}
-  ;; => {:status 200, :content-type :application/zip}
-  ;; Body is a String — binary zip data gets corrupted.
+  (def reca-seqs (nav (datafy reca-pkg) :ncbi.nav/gene-fasta :deferred))
+  ;; => [{:acc "NC_000913.3:c2823769-2822708", :sequence "ATGGC...", ...}]
 
-  ;; === Workaround: download with hato directly, :as :byte-array ===
-  (let [resp (hc/get "https://api.ncbi.nlm.nih.gov/datasets/v2/gene/id/947170/download"
-                     {:as :byte-array
-                      :query-params {"include_annotation_type" "FASTA_GENE"}})]
-    (with-open [os (java.io.FileOutputStream. "/tmp/reca-gene.zip")]
-      (.write os ^bytes (:body resp)))
-    {:status (:status resp) :size (count (:body resp))})
-  ;; => {:status 200, :size 4061}
-  ;; unzip -l shows: ncbi_dataset/data/gene.fna ✓
+  ;; === Or use the direct helper ===
+  (def k12-fasta (first (get-gene-fasta client "947170")))
+  (def o157-fasta (first (get-gene-fasta client "914722")))
 
-  ;; === Also tried: :download-prokaryote-gene-package (by protein accession) ===
-  ;; This endpoint returned a zip with catalog but NO actual FASTA files.
-  ;; :download-gene-package (by gene ID) is the one that works.
+  ;; === Compare recA across strains ===
+  (compare-sequences k12-fasta o157-fasta)
+  ;; => {:same-length? true, :identity "99.7%", :mismatches 3,
+  ;;     :differences [{:pos 231, :a \C, :b \T}
+  ;;                   {:pos 242, :a \C, :b \T}
+  ;;                   {:pos 917, :a \G, :b \A}]}
 
   )

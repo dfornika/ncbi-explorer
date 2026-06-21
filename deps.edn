@@ -6,8 +6,7 @@
 
  :aliases
  {:dev {:extra-paths ["src/dev"]}
-  :nrepl {:extra-paths ["src/test"]
-          :extra-deps {nrepl/nrepl {:mvn/version "1.7.0"}
+  :nrepl {:extra-deps {nrepl/nrepl {:mvn/version "1.7.0"}
                        ch.qos.logback/logback-classic {:mvn/version "1.5.34"}}
           :jvm-opts ["-Djdk.attach.allowAttachSelf"]
           :main-opts ["-m" "nrepl.cmdline" "--port" "7888"]}}}

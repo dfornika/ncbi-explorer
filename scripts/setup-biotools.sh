@@ -24,12 +24,18 @@ conda config --add channels bioconda 2>/dev/null || true
 conda config --add channels conda-forge 2>/dev/null || true
 conda config --set channel_priority strict
 
-# --- Alignment tools ---
-echo "Installing alignment tools..."
-conda install -y -q mafft muscle
+# --- Biotools environment ---
+ENV_NAME="${BIOTOOLS_ENV:-biotools}"
+
+if conda env list | grep -q "^${ENV_NAME} "; then
+  echo "Conda environment '$ENV_NAME' already exists"
+else
+  echo "Creating conda environment '$ENV_NAME'..."
+  conda create -y -q -n "$ENV_NAME" mafft muscle
+fi
 
 echo ""
 echo "=== Bioinformatics tools ready ==="
-echo "  Activate conda:  eval \"\$(~/miniforge3/bin/conda shell.bash hook)\""
-echo "  Align (MAFFT):   mafft --auto input.fasta > aligned.fasta"
+echo "  Activate:       eval \"\$(~/miniforge3/bin/conda shell.bash hook)\" && conda activate $ENV_NAME"
+echo "  Align (MAFFT):  mafft --auto input.fasta > aligned.fasta"
 echo "  Align (MUSCLE):  muscle -align input.fasta -output aligned.fasta"

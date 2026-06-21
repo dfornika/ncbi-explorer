@@ -3,6 +3,7 @@
             [ncbi-api-client.datafy :as d]
             [ncbi-api-client.package :as pkg]
             [clojure.datafy :refer [datafy nav]]
+            [clojure.java.shell :refer [sh]]
             [clojure.string :as str]
             [martian.core :as martian]))
 
@@ -39,6 +40,31 @@
      :mismatches (count diffs)
      :identity (format "%.1f%%" (* 100.0 (/ (- min-len (count diffs)) min-len)))
      :differences (vec diffs)}))
+
+(defn seqs->fasta
+  "Convert a sequence of maps with :acc, :description, :sequence to FASTA format."
+  [seqs]
+  (str/join "\n" (mapcat (fn [s] [(str ">" (:acc s) " " (:description s))
+                                  (:sequence s)])
+                         seqs)))
+
+(defn run-mafft
+  "Align sequences using MAFFT. Takes a collection of sequence maps,
+   returns the aligned FASTA as a string."
+  [seqs & [{:keys [conda-env] :or {conda-env "biotools"}}]]
+  (let [input-file (java.io.File/createTempFile "mafft-in" ".fasta")
+        conda-dir (str (System/getProperty "user.home") "/miniforge3")]
+    (try
+      (spit input-file (seqs->fasta seqs))
+      (let [result (sh "bash" "-c"
+                       (str "eval \"$(" conda-dir "/bin/conda shell.bash hook)\" && "
+                            "conda activate " conda-env " && "
+                            "mafft --auto " (.getAbsolutePath input-file)))]
+        (if (zero? (:exit result))
+          (:out result)
+          (throw (ex-info "MAFFT failed" {:stderr (:err result)}))))
+      (finally
+        (.delete input-file)))))
 
 (comment
   ;; === Setup ===
@@ -86,5 +112,17 @@
   ;;     :differences [{:pos 231, :a \C, :b \T}
   ;;                   {:pos 242, :a \C, :b \T}
   ;;                   {:pos 917, :a \G, :b \A}]}
+
+  ;; === Align with MAFFT ===
+  (def aligned (run-mafft [k12-fasta o157-fasta]))
+  (println aligned)
+
+  ;; === Full pipeline: fetch + align ===
+  (let [gene-ids ["947170" "914722"]
+        seqs (mapcat #(do (Thread/sleep 1500)
+                          (get-gene-fasta client %))
+                     gene-ids)]
+    (spit "/tmp/recA-aligned.fasta" (run-mafft seqs))
+    (println "Aligned" (count seqs) "sequences"))
 
   )

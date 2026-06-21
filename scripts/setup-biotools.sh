@@ -31,7 +31,7 @@ if conda env list | grep -q "^${ENV_NAME} "; then
   echo "Conda environment '$ENV_NAME' already exists"
 else
   echo "Creating conda environment '$ENV_NAME'..."
-  conda create -y -q -n "$ENV_NAME" mafft muscle
+  conda create -y -q -n "$ENV_NAME" mafft muscle mash
 fi
 
 echo ""

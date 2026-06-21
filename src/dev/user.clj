@@ -48,23 +48,73 @@
                                   (:sequence s)])
                          seqs)))
 
+(def ^:private conda-dir
+  (str (System/getProperty "user.home") "/miniforge3"))
+
+(def ^:private default-conda-env "biotools")
+
+(defn- conda-sh
+  "Run a command inside a conda environment. Returns the sh result map."
+  [conda-env & args]
+  (sh "bash" "-c"
+      (str "eval \"$(" conda-dir "/bin/conda shell.bash hook)\" && "
+           "conda activate " conda-env " && "
+           (str/join " " args))))
+
 (defn run-mafft
   "Align sequences using MAFFT. Takes a collection of sequence maps,
    returns the aligned FASTA as a string."
   [seqs & [{:keys [conda-env] :or {conda-env "biotools"}}]]
-  (let [input-file (java.io.File/createTempFile "mafft-in" ".fasta")
-        conda-dir (str (System/getProperty "user.home") "/miniforge3")]
+  (let [input-file (java.io.File/createTempFile "mafft-in" ".fasta")]
     (try
       (spit input-file (seqs->fasta seqs))
-      (let [result (sh "bash" "-c"
-                       (str "eval \"$(" conda-dir "/bin/conda shell.bash hook)\" && "
-                            "conda activate " conda-env " && "
-                            "mafft --auto " (.getAbsolutePath input-file)))]
+      (let [result (conda-sh conda-env "mafft" "--auto" (.getAbsolutePath input-file))]
         (if (zero? (:exit result))
           (:out result)
           (throw (ex-info "MAFFT failed" {:stderr (:err result)}))))
       (finally
         (.delete input-file)))))
+
+(defn get-assembly-fasta
+  "Download genome FASTA for an assembly accession. Returns sequence maps."
+  [client accession]
+  (let [pkg (ncbi/download-assembly-package client accession
+                                            {:include-annotations [:genome-fasta]})]
+    (nav (datafy pkg) :ncbi.nav/gene-fasta :deferred)))
+
+(defn run-mash-dist
+  "Screen a FASTA file against a Mash sketch database.
+   Returns a sorted vector of hit maps."
+  [fasta-path sketch-path & [{:keys [max-dist conda-env]
+                               :or {max-dist 0.05
+                                    conda-env "biotools"}}]]
+  (let [result (conda-sh conda-env
+                         "mash" "dist"
+                         sketch-path fasta-path
+                         "-v" (str max-dist))]
+    (if (zero? (:exit result))
+      (->> (str/split-lines (:out result))
+           (remove str/blank?)
+           (mapv (fn [line]
+                   (let [[ref query dist p-val hashes] (str/split line #"\t")]
+                     {:reference ref
+                      :distance (Double/parseDouble dist)
+                      :p-value (Double/parseDouble p-val)
+                      :matching-hashes hashes})))
+           (sort-by :distance))
+      (throw (ex-info "Mash failed" {:stderr (:err result)})))))
+
+(defn screen-assembly
+  "Download an assembly and screen it against a Mash sketch database.
+   Returns sorted hits."
+  [client accession sketch-path & [opts]]
+  (let [seqs (get-assembly-fasta client accession)
+        fasta-file (java.io.File/createTempFile "mash-query" ".fasta")]
+    (try
+      (spit fasta-file (seqs->fasta seqs))
+      (run-mash-dist (.getAbsolutePath fasta-file) sketch-path opts)
+      (finally
+        (.delete fasta-file)))))
 
 (comment
   ;; === Setup ===
@@ -124,5 +174,27 @@
                      gene-ids)]
     (spit "/tmp/recA-aligned.fasta" (run-mafft seqs))
     (println "Aligned" (count seqs) "sequences"))
+
+  ;; === Mash: screen assembly against RefSeq ===
+  (def refseq-sketch "data/RefSeqSketches_227.msh")
+
+  ;; Download assembly, write FASTA, screen against RefSeq — all in one call
+  (def o157-hits (screen-assembly client "GCF_000008865.2" refseq-sketch))
+  (take 10 o157-hits)
+  ;; => [{:reference "Escherichia_coli_GCF_000008865.2.fasta", :distance 0.0, ...}
+  ;;     {:reference "Shigella_dysenteriae_GCF_022354085.1.fasta", :distance 0.017, ...}
+  ;;     {:reference "Escherichia_coli_GCF_000005845.2.fasta", :distance 0.023, ...}
+  ;;     ...]
+
+  ;; Or step by step:
+  (def asm-seqs (get-assembly-fasta client "GCF_000008865.2"))
+  (mapv #(hash-map :acc (:acc %) :length (count (:sequence %))) asm-seqs)
+  ;; => [{:acc "NC_002695.2", :length 5498578}   ; chromosome
+  ;;     {:acc "NC_002127.1", :length 3306}       ; pO157 plasmid
+  ;;     {:acc "NC_002128.1", :length 92721}]     ; pOSAK1 plasmid
+
+  (spit "/tmp/o157-sakai.fasta" (seqs->fasta asm-seqs))
+  (def hits (run-mash-dist "/tmp/o157-sakai.fasta" refseq-sketch))
+  (take 5 hits)
 
   )

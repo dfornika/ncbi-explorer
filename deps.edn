@@ -1,6 +1,6 @@
 {:deps {io.github.dfornika/ncbi-api-client-clj
         {:git/url "https://github.com/dfornika/ncbi-api-client-clj.git"
-         :git/sha "a79fee55aa2d88cdfdce6351cc431521f11170bd"}}
+         :git/sha "7c4617fededa0b352e4c3264c240039722eda89d"}}
 
  :paths ["src/main"]
 

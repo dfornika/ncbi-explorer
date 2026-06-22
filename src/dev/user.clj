@@ -197,4 +197,111 @@
   (def hits (run-mash-dist "/tmp/o157-sakai.fasta" refseq-sketch))
   (take 5 hits)
 
+  ;; === E-utilities: search -> bridge -> Datasets ===
+  ;; ncbi/search wraps esearch+esummary and tags results with datafy/nav metadata.
+  ;; datafy on a result lazily discovers available cross-database links.
+  ;; nav :ncbi.nav/datasets-entity bridges from eutils into the Datasets entity graph.
+
+  ;; List available Entrez databases
+  (ncbi/einfo client)
+  ;; => ["pubmed" "protein" "nuccore" "gene" "assembly" "taxonomy" ...]
+
+  ;; Search for the SARS-CoV-2 spike gene using Entrez field-tagged query
+  (def spike-results (ncbi/search client "gene" "S[gene] AND txid2697049[orgn]" {:retmax 5}))
+  (meta spike-results)
+  ;; => {:ncbi/total-count 48, :ncbi/retmax 5, ...}
+
+  (mapv (fn [r] {:uid (:uid r)
+                 :name (:name r)
+                 :description (:description r)
+                 :organism (get-in r [:organism :scientificname])})
+        spike-results)
+  ;; => [{:uid "43740568", :name "S", :description "surface glycoprotein",
+  ;;      :organism "Severe acute respiratory syndrome coronavirus 2"} ...]
+
+  ;; Discover available links via datafy
+  (def spike-hit (first spike-results))
+  (filterv #(or (= (namespace %) "ncbi.elink") (= (namespace %) "ncbi.nav"))
+           (keys (datafy spike-hit)))
+  ;; => [:ncbi.elink/gene_pubmed :ncbi.elink/gene_protein_refseq
+  ;;     :ncbi.elink/gene_taxonomy :ncbi.elink/gene_nuccore
+  ;;     :ncbi.nav/datasets-entity ...]
+
+  ;; Bridge into Datasets: get the full gene entity
+  (def spike-gene (nav (datafy spike-hit) :ncbi.nav/datasets-entity :deferred))
+  {:gene_id (:gene_id spike-gene)
+   :symbol (:symbol spike-gene)
+   :description (:description spike-gene)
+   :type (:type spike-gene)}
+  ;; => {:gene_id "43740568", :symbol "S", :description "surface glycoprotein",
+  ;;     :type "PROTEIN_CODING"}
+
+  ;; Follow cross-database links: gene -> PubMed articles
+  (def spike-pubs (nav (datafy spike-hit) :ncbi.elink/gene_pubmed :deferred))
+  {:total (get (meta spike-pubs) :ncbi.elink/total-count)
+   :returned (count spike-pubs)}
+  ;; => {:total 1372, :returned 200}
+
+  (mapv (fn [p] {:title (:title p) :source (:source p) :pubdate (:pubdate p)})
+        (take 3 spike-pubs))
+  ;; => [{:title "SARS-CoV-2 variant spike and accessory gene mutations alter pathogenesis.",
+  ;;      :source "Proc Natl Acad Sci U S A", :pubdate "2022 Sep 13"} ...]
+
+  ;; Follow cross-database links: gene -> RefSeq proteins
+  (def spike-proteins (nav (datafy spike-hit) :ncbi.elink/gene_protein_refseq :deferred))
+  (mapv (fn [p] {:accession (:accessionversion p) :title (:title p)}) spike-proteins)
+  ;; => [{:accession "YP_009724390.1",
+  ;;      :title "surface glycoprotein [Severe acute respiratory syndrome coronavirus 2]"}]
+
+  ;; === Full pipeline: text search -> bridge -> FASTA download ===
+  (let [results (ncbi/search client "gene" "S[gene] AND txid2697049[orgn]" {:retmax 1})
+        hit (first results)
+        gene-entity (nav (datafy hit) :ncbi.nav/datasets-entity :deferred)
+        fasta (get-gene-fasta client (:gene_id gene-entity))]
+    {:search-uid (:uid hit)
+     :gene-id (:gene_id gene-entity)
+     :symbol (:symbol gene-entity)
+     :fasta-count (count fasta)
+     :fasta-length (count (:sequence (first fasta)))
+     :fasta-acc (:acc (first fasta))})
+  ;; => {:search-uid "43740568", :gene-id "43740568", :symbol "S",
+  ;;     :fasta-count 1, :fasta-length 3822, :fasta-acc "NC_045512.2:21563-25384"}
+
+  ;; === Virus genome exploration ===
+  ;; Taxonomy structure differs for viruses: :classification instead of :lineage/:rank
+
+  (def sars2 (first (ncbi/taxonomy client ["2697049"])))
+  {:name (get-in sars2 [:current_scientific_name :name])
+   :group (:group_name sars2)
+   :moltype (:genomic_moltype sars2)
+   :family (get-in sars2 [:classification :family :name])
+   :genus (get-in sars2 [:classification :genus :name])}
+  ;; => {:name "Severe acute respiratory syndrome coronavirus 2",
+  ;;     :group "viruses", :moltype "ssRNA(+)",
+  ;;     :family "Coronaviridae", :genus "Betacoronavirus"}
+
+  ;; All SARS-CoV-2 genes from the reference genome
+  (def sars2-annots (ncbi/annotations client "GCF_009858895.2"))
+  (mapv (fn [a] {:symbol (:symbol a) :gene_id (:gene_id a)}) sars2-annots)
+  ;; => [{:symbol "ORF1ab", :gene_id "43740578"}
+  ;;     {:symbol "S", :gene_id "43740568"}
+  ;;     {:symbol "E", :gene_id "43740570"}
+  ;;     {:symbol "M", :gene_id "43740571"}
+  ;;     {:symbol "N", :gene_id "43740575"} ...]
+
+  ;; === Three-way coronavirus spike gene comparison ===
+  ;; SARS-CoV-2, SARS-CoV-1, and MERS-CoV
+
+  (def sars2-spike (first (get-gene-fasta client "43740568")))  ; 3822 bp
+  (def sars1-spike (first (get-gene-fasta client "1489668")))   ; 3768 bp
+  (def mers-spike  (first (get-gene-fasta client "14254594")))  ; 4062 bp
+
+  (def spike-alignment (run-mafft [sars2-spike sars1-spike mers-spike]))
+  (spit "/tmp/coronavirus-spike-aligned.fasta" spike-alignment)
+
+  ;; Pairwise identity from three-way alignment:
+  ;; SARS-CoV-2 vs SARS-CoV-1: 64.8%
+  ;; SARS-CoV-2 vs MERS-CoV:   42.5%
+  ;; SARS-CoV-1 vs MERS-CoV:   42.1%
+
   )
